@@ -185,37 +185,55 @@ def test_all_mirrors_parallel(timeout=3.0):
 
 def make_menu_renderable(mirrors_list, selected_index):
     """Creates a beautifully styled Panel containing options for the interactive menu."""
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold magenta", expand=True)
-    table.add_column("选择", justify="center", width=4)
-    table.add_column("别名 (Alias)", style="cyan", width=12)
-    table.add_column("镜像源名称", style="green", width=20)
-    table.add_column("延迟 (Latency)", justify="right", width=15)
-    table.add_column("镜像源地址", style="dim")
+    table = Table(
+        box=box.DOUBLE_EDGE, 
+        show_header=True, 
+        header_style="bold bright_magenta", 
+        expand=True,
+        border_style="bright_blue"
+    )
+    table.add_column("选择 (Select)", justify="center", width=8, style="bold yellow")
+    table.add_column("别名 (Alias)", style="bold cyan", width=12)
+    table.add_column("镜像源 (Mirror Name)", style="bold green", width=22)
+    table.add_column("网络延迟 (Latency)", justify="right", width=15)
+    table.add_column("网络状态 (Status)", justify="center", width=15)
+    table.add_column("镜像源地址 (URL)", style="dim")
 
     for i, item in enumerate(mirrors_list):
         is_selected = (i == selected_index)
-        sel_marker = "[bold yellow]➔[/bold yellow]" if is_selected else " "
+        sel_marker = "[bold blink yellow]▶[/bold blink yellow]" if is_selected else " "
         
         latency = item["latency"]
         if item["alias"] == "cancel":
             latency_str = ""
+            status_str = ""
         elif latency == float('inf'):
-            latency_str = "[bold red]超时/错误[/bold red]"
-        elif latency < 150:
-            latency_str = f"[bold green]{latency:.1f} ms[/bold green]"
-        elif latency < 400:
-            latency_str = f"[bold yellow]{latency:.1f} ms[/bold yellow]"
+            latency_str = "[bold red]--[/bold red]"
+            status_str = "🔴 [bold red]异常[/bold red]"
         else:
-            latency_str = f"[bold red]{latency:.1f} ms[/bold red]"
+            if latency < 100:
+                latency_str = f"[bold green]{latency:.1f} ms[/bold green]"
+                status_str = "🟢 [bold green]极速[/bold green]"
+            elif latency < 300:
+                latency_str = f"[bold yellow]{latency:.1f} ms[/bold yellow]"
+                status_str = "🟡 [bold yellow]中速[/bold yellow]"
+            else:
+                latency_str = f"[bold red]{latency:.1f} ms[/bold red]"
+                status_str = "🟠 [bold red]较慢[/bold red]"
             
         cur_marker = " [bold green](当前)[/bold green]" if item["is_current"] else ""
         name_str = f"{item['name']}{cur_marker}"
 
         if is_selected:
-            # Highlight selected row
-            name_str = f"[bold white on blue]{name_str}[/bold white on blue]"
-            alias_str = f"[bold white on blue]{item['alias']}[/bold white on blue]"
-            url_str = f"[bold white on blue]{item['url']}[/bold white on blue]" if item["alias"] != "cancel" else ""
+            # Gorgeous highlight: white text on deep sky blue background
+            name_str = f"[bold white on deep_sky_blue1] {name_str} [/bold white on deep_sky_blue1]"
+            alias_str = f"[bold white on deep_sky_blue1] {item['alias']} [/bold white on deep_sky_blue1]"
+            url_str = f"[bold white on deep_sky_blue1] {item['url']} [/bold white on deep_sky_blue1]" if item["alias"] != "cancel" else ""
+            if latency_str:
+                clean_lat = latency_str.replace('[bold green]', '').replace('[bold yellow]', '').replace('[bold red]', '').replace('[/bold green]', '').replace('[/bold yellow]', '').replace('[/bold red]', '')
+                latency_str = f"[bold white on deep_sky_blue1] {clean_lat} [/bold white on deep_sky_blue1]"
+            if status_str:
+                status_str = f"[bold white on deep_sky_blue1] {status_str} [/bold white on deep_sky_blue1]"
         else:
             alias_str = item['alias']
             url_str = item['url'] if item["alias"] != "cancel" else ""
@@ -225,13 +243,15 @@ def make_menu_renderable(mirrors_list, selected_index):
             alias_str,
             name_str,
             latency_str,
+            status_str,
             url_str
         )
     return Panel(
         table,
-        title="[bold green]🚀 YYDS-PIP: 镜像源选择菜单[/bold green]",
-        border_style="magenta",
-        subtitle="[dim]使用 ↑/↓ 选择，Enter 确认，Esc/q 退出[/dim]"
+        title="[bold bright_green]YYDS-PIP: 极速镜像源选择菜单[/bold bright_green]",
+        border_style="bright_blue",
+        subtitle="[bold dim]💡 使用键盘 ↑/↓ 移动选择，Enter 确认修改，Esc/q/❌ 退出[/bold dim]",
+        subtitle_align="center"
     )
 
 def interactive_selection(mirrors_list):
@@ -271,7 +291,7 @@ def interactive_selection(mirrors_list):
 
 # ----------------- CLI Setup -----------------
 
-@click.group(invoke_without_command=True)
+@click.group(invoke_without_command=True, context_settings=dict(help_option_names=['-h', '--help']))
 @click.version_option(version=__version__, message="%(prog)s version %(version)s")
 @click.pass_context
 def main(ctx):
@@ -336,11 +356,18 @@ def test(timeout):
         progress.add_task("testing", total=None)
         results = test_all_mirrors_parallel(timeout)
 
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold magenta", expand=False)
+    table = Table(
+        box=box.DOUBLE_EDGE, 
+        show_header=True, 
+        header_style="bold bright_magenta", 
+        expand=False, 
+        border_style="bright_blue"
+    )
     table.add_column("当前", justify="center", style="bold green", width=5)
     table.add_column("别名 (Alias)", style="bold yellow")
     table.add_column("镜像源名称", style="green")
     table.add_column("延迟 (Latency)", justify="right")
+    table.add_column("网络状态", justify="center")
     table.add_column("镜像源地址", style="dim")
 
     # Sort results: faster first, offline last
@@ -355,16 +382,20 @@ def test(timeout):
         
         if not success:
             latency_str = "[bold red]超时/错误[/bold red]"
-        elif latency < 150:
+            status_str = "🔴 [bold red]异常[/bold red]"
+        elif latency < 100:
             latency_str = f"[bold green]{latency:.1f} ms[/bold green]"
-        elif latency < 400:
+            status_str = "🟢 [bold green]极速[/bold green]"
+        elif latency < 300:
             latency_str = f"[bold yellow]{latency:.1f} ms[/bold yellow]"
+            status_str = "🟡 [bold yellow]中速[/bold yellow]"
         else:
             latency_str = f"[bold red]{latency:.1f} ms[/bold red]"
+            status_str = "🟠 [bold red]较慢[/bold red]"
             
-        table.add_row(marker, alias, info["name"], latency_str, info["url"])
+        table.add_row(marker, alias, info["name"], latency_str, status_str, info["url"])
 
-    console.print(Panel(table, title="[bold green]镜像源延迟测试结果 (按速度排序)[/bold green]", border_style="magenta", expand=False))
+    console.print(Panel(table, title="[bold bright_green]镜像源延迟测试结果 (按速度排序)[/bold bright_green]", border_style="bright_blue", expand=False))
 
 @main.command(name="set")
 @click.argument("alias_or_url")
@@ -473,13 +504,13 @@ def select_mirror(timeout):
                 break
                 
     status_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
-    status_table.add_row("[bold yellow]当前配置 (Current):[/bold yellow]", f"[bold green]{found_name}[/bold green]")
-    status_table.add_row("[bold yellow]镜像链接 (URL):[/bold yellow]", f"[dim]{current_url or 'https://pypi.org/simple/'}[/dim]")
+    status_table.add_row("💡 [bold yellow]当前所用源 (Current):[/bold yellow]", f"[bold green]{found_name}[/bold green]")
+    status_table.add_row("🔗 [bold yellow]镜像源地址 (Index URL):[/bold yellow]", f"[cyan]{current_url or 'https://pypi.org/simple/'}[/cyan]")
     
     console.print(Panel(
         status_table, 
-        title="[bold green]📊 当前状态 (Status)[/bold green]", 
-        border_style="green",
+        title="[bold bright_cyan]pip 当前网络配置状态 (Active Configuration)[/bold bright_cyan]", 
+        border_style="bright_cyan",
         expand=False
     ))
 
