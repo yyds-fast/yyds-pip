@@ -269,6 +269,50 @@ def interactive_selection(mirrors_list):
 
 # ----------------- CLI Setup -----------------
 
+def show_dashboard():
+    """Prints a beautiful status dashboard and command usage helper."""
+    console.print("\n[bold magenta]🚀 YYDS-PIP: 极速 PyPI 镜像源管理工具[/bold magenta]\n")
+    
+    current_url = get_current_index_url()
+    found_name = "未配置 (默认官方 PyPI)"
+    if current_url:
+        for name, info in MIRRORS.items():
+            if info["url"].rstrip('/') == current_url.rstrip('/'):
+                found_name = f"{info['name']} ({name})"
+                break
+                
+    table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+    table.add_row("[bold yellow]当前镜像源 (Current):[/bold yellow]", f"[bold green]{found_name}[/bold green]")
+    table.add_row("[bold yellow]镜像源地址 (URL):[/bold yellow]", f"[dim]{current_url or 'https://pypi.org/simple/'}[/dim]")
+    
+    console.print(Panel(
+        table, 
+        title="[bold green]📊 当前状态 (Status)[/bold green]", 
+        border_style="green",
+        expand=False
+    ))
+    
+    cmd_table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
+    cmd_table.add_column("命令 (Command)", style="bold yellow", width=24)
+    cmd_table.add_column("描述 (Description)", style="green")
+    
+    cmd_table.add_row("yyds-pip select", "进入键盘交互式选择菜单（方向键 ↑/↓ 选择）")
+    cmd_table.add_row("yyds-pip best", "自动测试并发延迟，一键切换最快镜像源")
+    cmd_table.add_row("yyds-pip test", "对所有镜像源并发测速，输出延迟排行榜")
+    cmd_table.add_row("yyds-pip show", "查看当前 pip 配置的详细参数")
+    cmd_table.add_row("yyds-pip list", "列出所有内置支持的镜像源地址")
+    cmd_table.add_row("yyds-pip set <alias|url>", "手动设置 pip 镜像源（支持别名或自定义 URL）")
+    cmd_table.add_row("yyds-pip reset", "恢复官方默认镜像源 (PyPI)")
+    
+    console.print(Panel(
+        cmd_table,
+        title="[bold cyan]💡 常用命令指引 (Commands Guide)[/bold cyan]",
+        border_style="cyan",
+        expand=False
+    ))
+    
+    console.print("[dim]提示：直接运行 [bold]yyds-pip select[/bold] 可进入交互式键盘选择菜单；输入 [bold]yyds-pip --help[/bold] 获取详细帮助。[/dim]\n")
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, message="%(prog)s version %(version)s")
 @click.pass_context
@@ -276,7 +320,7 @@ def main(ctx):
     """🚀 YYDS-PIP: 极速、便捷、美观的 PyPI 镜像源管理工具"""
     # Print custom beautiful banner
     if ctx.invoked_subcommand is None:
-        ctx.invoke(select)
+        show_dashboard()
 
 @main.command(name="show")
 def show():
