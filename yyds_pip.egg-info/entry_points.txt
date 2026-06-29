@@ -1,2 +1,0 @@
-[console_scripts]
-yyds-pip = yyds_pip.cli:main
