@@ -261,7 +261,7 @@ def make_menu_renderable(mirrors_list, selected_index):
 # ----------------- CLI Setup -----------------
 
 @click.group(invoke_without_command=True, context_settings=dict(help_option_names=['-h', '--help']))
-@click.version_option(version=__version__, message="%(prog)s version %(version)s")
+@click.version_option(__version__, '-v', '-V', '--version', message="%(prog)s version %(version)s")
 @click.pass_context
 def main(ctx):
     """🚀 YYDS-PIP: 极速、便捷、美观的 PyPI 镜像源管理工具"""
