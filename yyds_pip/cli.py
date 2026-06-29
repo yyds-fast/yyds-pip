@@ -97,10 +97,7 @@ def get_key():
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        # Check if stdin has data
-        r, _, _ = select.select([fd], [], [], 0.1)
-        if not r:
-            return None
+        # Block until stdin has data
         ch = os.read(fd, 1).decode('utf-8', errors='ignore')
         if ch == '\x1b':
             # Check if it's an arrow key escape sequence
@@ -189,7 +186,7 @@ def make_menu_renderable(mirrors_list, selected_index):
         box=box.DOUBLE_EDGE, 
         show_header=True, 
         header_style="bold bright_magenta", 
-        expand=True,
+        expand=False,
         border_style="bright_blue"
     )
     table.add_column("选择 (Select)", justify="center", width=8, style="bold yellow")
@@ -207,6 +204,9 @@ def make_menu_renderable(mirrors_list, selected_index):
         if item["alias"] == "cancel":
             latency_str = ""
             status_str = ""
+        elif latency is None:
+            latency_str = "[bold blue]测速中...[/bold blue]"
+            status_str = "[bold blue]测速中...[/bold blue]"
         elif latency == float('inf'):
             latency_str = "[bold red]--[/bold red]"
             status_str = "🔴 [bold red]异常[/bold red]"
@@ -226,14 +226,15 @@ def make_menu_renderable(mirrors_list, selected_index):
 
         if is_selected:
             # Gorgeous highlight: white text on deep sky blue background
-            name_str = f"[bold white on deep_sky_blue1] {name_str} [/bold white on deep_sky_blue1]"
-            alias_str = f"[bold white on deep_sky_blue1] {item['alias']} [/bold white on deep_sky_blue1]"
-            url_str = f"[bold white on deep_sky_blue1] {item['url']} [/bold white on deep_sky_blue1]" if item["alias"] != "cancel" else ""
+            name_str = f"[bold white on deep_sky_blue1]{name_str}[/bold white on deep_sky_blue1]"
+            alias_str = f"[bold white on deep_sky_blue1]{item['alias']}[/bold white on deep_sky_blue1]"
+            url_str = f"[bold white on deep_sky_blue1]{item['url']}[/bold white on deep_sky_blue1]" if item["alias"] != "cancel" else ""
             if latency_str:
                 clean_lat = latency_str.replace('[bold green]', '').replace('[bold yellow]', '').replace('[bold red]', '').replace('[/bold green]', '').replace('[/bold yellow]', '').replace('[/bold red]', '')
-                latency_str = f"[bold white on deep_sky_blue1] {clean_lat} [/bold white on deep_sky_blue1]"
+                latency_str = f"[bold white on deep_sky_blue1]{clean_lat}[/bold white on deep_sky_blue1]"
             if status_str:
-                status_str = f"[bold white on deep_sky_blue1] {status_str} [/bold white on deep_sky_blue1]"
+                clean_status = status_str.replace('[bold green]', '').replace('[bold yellow]', '').replace('[bold red]', '').replace('[/bold green]', '').replace('[/bold yellow]', '').replace('[/bold red]', '')
+                status_str = f"[bold white on deep_sky_blue1]{clean_status}[/bold white on deep_sky_blue1]"
         else:
             alias_str = item['alias']
             url_str = item['url'] if item["alias"] != "cancel" else ""
@@ -254,40 +255,7 @@ def make_menu_renderable(mirrors_list, selected_index):
         subtitle_align="center"
     )
 
-def interactive_selection(mirrors_list):
-    """Runs the interactive arrow-key selection menu loop."""
-    selected_index = 0
-    # Try to find current active mirror to set default selection
-    for i, item in enumerate(mirrors_list):
-        if item["is_current"]:
-            selected_index = i
-            break
 
-    console.print("\n[bold magenta]👉 请使用 [yellow]↑/↓ (方向键)[/yellow] 选择镜像源，按 [yellow]Enter (回车键)[/yellow] 确认配置，或按 [yellow]Esc/q[/yellow] 退出：[/bold magenta]")
-    
-    console.show_cursor(False)
-    try:
-        with Live(make_menu_renderable(mirrors_list, selected_index), console=console, auto_refresh=False) as live:
-            while True:
-                live.update(make_menu_renderable(mirrors_list, selected_index))
-                live.refresh()
-                
-                key = get_key()
-                if not key:
-                    continue
-                
-                if key in ('\r', '\n'):  # Enter
-                    return mirrors_list[selected_index]
-                elif key in ('q', 'Q', '\x1b'):  # Esc, 'q'
-                    return None
-                elif key == '\x1b[A':  # Up Arrow
-                    selected_index = (selected_index - 1) % len(mirrors_list)
-                elif key == '\x1b[B':  # Down Arrow
-                    selected_index = (selected_index + 1) % len(mirrors_list)
-                elif key == '\x03':  # Ctrl+C
-                    raise KeyboardInterrupt
-    finally:
-        console.show_cursor(True)
 
 # ----------------- CLI Setup -----------------
 
@@ -495,7 +463,7 @@ def select_mirror(timeout):
     """🎮 并发测速并进入键盘交互式选择菜单"""
     current_url = get_current_index_url()
     
-    # Show status before testing
+    # 1. Show status immediately
     found_name = "未配置 (默认官方 PyPI)"
     if current_url:
         for name, info in MIRRORS.items():
@@ -514,33 +482,19 @@ def select_mirror(timeout):
         expand=False
     ))
 
-    results = {}
-    with Progress(
-        SpinnerColumn(spinner_name="dots12"),
-        TextColumn("[bold blue]正在极速并发测速，请稍候...[/bold blue]"),
-        console=console,
-        transient=True
-    ) as progress:
-        progress.add_task("testing", total=None)
-        results = test_all_mirrors_parallel(timeout)
-
-    # Format list
+    # 2. Build initial mirrors list (latency=None -> "测速中...")
     mirrors_list = []
     for alias, info in MIRRORS.items():
-        latency, success = results.get(alias, (float('inf'), False))
         is_current = current_url and current_url.rstrip('/') == info["url"].rstrip('/')
         mirrors_list.append({
             "alias": alias,
             "name": info["name"],
             "url": info["url"],
             "trusted_host": info["trusted_host"],
-            "latency": latency,
+            "latency": None,
             "is_current": is_current
         })
-
-    # Sort list: faster first
-    mirrors_list.sort(key=lambda x: x["latency"])
-
+        
     # Add cancel option at the bottom
     mirrors_list.append({
         "alias": "cancel",
@@ -551,13 +505,98 @@ def select_mirror(timeout):
         "is_current": False
     })
 
-    # Run selection
+    # Thread-safe selection state
+    state = {"selected_index": 0}
+    # Try to find current active mirror to set default selection
+    for i, item in enumerate(mirrors_list):
+        if item["is_current"]:
+            state["selected_index"] = i
+            break
+
+    console.print("\n[bold magenta]👉 请使用 [yellow]↑/↓ (方向键)[/yellow] 选择镜像源，按 [yellow]Enter (回车键)[/yellow] 确认配置，或按 [yellow]Esc/q[/yellow] 退出：[/bold magenta]")
+    
+    import threading
+    render_lock = threading.Lock()
+    live = None
+
+    def safe_refresh():
+        if live is not None:
+            with render_lock:
+                try:
+                    live.update(make_menu_renderable(mirrors_list, state["selected_index"]))
+                except Exception:
+                    pass
+
+    # 3. Define background worker logic to test speeds
+    def bg_test_mirror(alias, live_ref):
+        _, latency, success = test_single_mirror(alias, MIRRORS[alias], timeout=timeout)
+        for item in mirrors_list:
+            if item["alias"] == alias:
+                item["latency"] = latency if success else float('inf')
+                break
+        safe_refresh()
+
+    def read_key(fd):
+        ch = os.read(fd, 1).decode('utf-8', errors='ignore')
+        if ch == '\x1b':
+            # Check for arrow keys
+            r2, _, _ = select.select([fd], [], [], 0.05)
+            if r2:
+                ch2 = os.read(fd, 1).decode('utf-8', errors='ignore')
+                if ch2 == '[':
+                    r3, _, _ = select.select([fd], [], [], 0.05)
+                    if r3:
+                        ch3 = os.read(fd, 1).decode('utf-8', errors='ignore')
+                        return f"\x1b[{ch3}"
+                return '\x1b'
+        return ch
+
+    console.show_cursor(False)
+    selected = None
+    executor = ThreadPoolExecutor(max_workers=len(MIRRORS))
+    
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    # Put terminal in cbreak mode to read keys immediately, but keep OPOST output processing enabled
+    tty.setcbreak(fd)
+    
     try:
-        selected = interactive_selection(mirrors_list)
+        with Live(make_menu_renderable(mirrors_list, state["selected_index"]), console=console, auto_refresh=True, refresh_per_second=10) as live_instance:
+            live = live_instance
+            # Launch background thread pool
+            for alias in MIRRORS.keys():
+                executor.submit(bg_test_mirror, alias, live)
+
+            # Keyboard event loop
+            while True:
+                key = read_key(fd)
+                if not key:
+                    continue
+                
+                if key in ('\r', '\n'):  # Enter
+                    selected = mirrors_list[state["selected_index"]]
+                    break
+                elif key in ('q', 'Q', '\x1b'):  # Esc, 'q'
+                    selected = None
+                    break
+                elif key == '\x1b[A':  # Up Arrow
+                    state["selected_index"] = (state["selected_index"] - 1) % len(mirrors_list)
+                    safe_refresh()
+                elif key == '\x1b[B':  # Down Arrow
+                    state["selected_index"] = (state["selected_index"] + 1) % len(mirrors_list)
+                    safe_refresh()
     except KeyboardInterrupt:
+        console.show_cursor(True)
+        executor.shutdown(wait=False)
         console.print("\n[bold red]✖ 用户取消选择。[/bold red]")
         return
+    finally:
+        console.show_cursor(True)
+        # Restore terminal settings
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        executor.shutdown(wait=False)
 
+    # 4. Process the selected mirror
     if selected and selected["alias"] != "cancel":
         # Set mirror
         success = set_pip_mirror(selected["url"], selected["trusted_host"])
