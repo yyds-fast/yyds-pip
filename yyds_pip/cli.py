@@ -252,7 +252,8 @@ def make_menu_renderable(mirrors_list, selected_index):
         title="[bold bright_green]YYDS-PIP: 极速镜像源选择菜单[/bold bright_green]",
         border_style="bright_blue",
         subtitle="[bold dim]💡 使用键盘 ↑/↓ 移动选择，Enter 确认修改，Esc/q/❌ 退出[/bold dim]",
-        subtitle_align="center"
+        subtitle_align="center",
+        expand=False
     )
 
 
