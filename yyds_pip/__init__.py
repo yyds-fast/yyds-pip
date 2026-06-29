@@ -1,1 +1,9 @@
-__version__ = "0.1.0"
+from .__version__ import (
+    __title__,
+    __description__,
+    __version__,
+    __author__,
+    __author_email__,
+    __url__,
+    __license__,
+)

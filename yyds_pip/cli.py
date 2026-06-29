@@ -16,6 +16,8 @@ from rich.live import Live
 from rich.panel import Panel
 from rich import box
 
+from .__version__ import __version__
+
 # System specific imports for reading keys
 try:
     import tty
@@ -268,7 +270,7 @@ def interactive_selection(mirrors_list):
 # ----------------- CLI Setup -----------------
 
 @click.group(invoke_without_command=True)
-@click.version_option(version="0.1.0", message="%(prog)s version %(version)s")
+@click.version_option(version=__version__, message="%(prog)s version %(version)s")
 @click.pass_context
 def main(ctx):
     """🚀 YYDS-PIP: 极速、便捷、美观的 PyPI 镜像源管理工具"""
