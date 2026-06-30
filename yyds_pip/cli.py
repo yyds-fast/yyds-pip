@@ -214,7 +214,8 @@ def check_network_status(timeout=1.5):
     """检测当前网络连接状态及延迟，返回 (延迟, 是否成功, 详细网络状况描述)"""
     target_urls = [
         ("https://www.baidu.com", "baidu.com"),
-        ("https://mirrors.aliyun.com/pypi/simple/pip/", "aliyun")
+        ("https://www.aliyun.com", "aliyun.com"),
+        ("https://www.360.cn", "360.cn")
     ]
     ssl_context = ssl._create_unverified_context()
     
@@ -632,14 +633,11 @@ def reset():
 def make_full_layout(mirrors_list, selected_index, current_url, found_name, network_status_str, warning_message=None):
     """组合状态看板与菜单列表为一个完整的渲染对象"""
     # 状态看板 Table
-    status_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+    status_table = Table(show_header=False, box=None, padding=(0, 2))
     status_table.add_row("💡 [bold yellow]当前所用源 (Current):[/bold yellow]", f"[bold green]{found_name}[/bold green]")
     status_table.add_row("🔗 [bold yellow]镜像源地址 (Index URL):[/bold yellow]", f"[cyan]{current_url or 'https://pypi.org/simple/'}[/cyan]")
     status_table.add_row("🌍 [bold yellow]当前网络状况 (Network):[/bold yellow]", network_status_str)
     
-    if warning_message:
-        status_table.add_row("", warning_message)
-        
     status_panel = Panel(
         status_table, 
         title="[bold bright_cyan]pip 当前网络配置状态 (Active Configuration)[/bold bright_cyan]", 
@@ -650,12 +648,17 @@ def make_full_layout(mirrors_list, selected_index, current_url, found_name, netw
     # 菜单 Panel
     menu_panel = make_menu_renderable(mirrors_list, selected_index)
     
-    # 返回组合对象，中间穿插操作指引
-    return Group(
-        status_panel, 
-        "\n[bold magenta]👉 请使用 [yellow]↑/↓ (方向键)[/yellow] 选择镜像源，按 [yellow]Enter (回车键)[/yellow] 确认配置，或按 [yellow]Esc/q[/yellow] 退出：[/bold magenta]\n", 
+    # Renderables list
+    renderables = [status_panel]
+    if warning_message:
+        renderables.append(f"\n  {warning_message}")
+        
+    renderables.extend([
+        "\n[bold magenta]👉 请使用 [yellow]↑/↓ (方向键)[/yellow] 选择镜像源，按 [yellow]Enter (回车键)[/yellow] 确认配置，或按 [yellow]Esc/q[/yellow] 退出：[/bold magenta]\n",
         menu_panel
-    )
+    ])
+    
+    return Group(*renderables)
 
 @main.command(name="select")
 @click.option("--timeout", default=3.0, type=float, help="请求超时时间（秒）")
