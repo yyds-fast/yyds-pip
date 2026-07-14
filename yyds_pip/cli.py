@@ -699,15 +699,18 @@ def select_mirror(timeout):
 
     # Thread-safe UI and selection state
     state = {
-        "selected_index": 0,
+        "selected_alias": "cancel",
         "network_status": "[bold blue]⏳ 正在检测...[/bold blue]",
         "warning_message": None
     }
     # Try to find current active mirror to set default selection
-    for i, item in enumerate(mirrors_list):
+    for item in mirrors_list:
         if item["is_current"]:
-            state["selected_index"] = i
+            state["selected_alias"] = item["alias"]
             break
+    if state["selected_alias"] == "cancel" and len(mirrors_list) > 1:
+        # Default to first non-cancel mirror
+        state["selected_alias"] = mirrors_list[0]["alias"]
 
     render_lock = threading.Lock()
     live = None
@@ -716,9 +719,15 @@ def select_mirror(timeout):
         if live is not None:
             with render_lock:
                 try:
+                    # Find selected_index based on selected_alias
+                    selected_index = 0
+                    for idx, item in enumerate(mirrors_list):
+                        if item["alias"] == state["selected_alias"]:
+                            selected_index = idx
+                            break
                     live.update(make_full_layout(
                         mirrors_list, 
-                        state["selected_index"], 
+                        selected_index, 
                         current_url, 
                         found_name, 
                         state["network_status"], 
@@ -730,10 +739,31 @@ def select_mirror(timeout):
     # 3. Define background worker logic to test speeds and network status
     def bg_test_mirror(alias, live_ref):
         _, latency, success = test_single_mirror(alias, MIRRORS[alias], timeout=timeout)
-        for item in mirrors_list:
-            if item["alias"] == alias:
-                item["latency"] = latency if success else float('inf')
-                break
+        with render_lock:
+            for item in mirrors_list:
+                if item["alias"] == alias:
+                    item["latency"] = latency if success else float('inf')
+                    break
+            
+            # Real-time sort (Live Sort)
+            # Order:
+            # 0: Completed and success (latency < inf) - sorted by latency ascending
+            # 1: Pending (latency is None) - sorted by original MIRRORS keys order
+            # 2: Failed/Timeout (latency == inf and alias != cancel) - sorted by original MIRRORS keys order
+            # 3: Cancel option (alias == cancel) - always at the bottom
+            alias_order = list(MIRRORS.keys())
+            
+            def get_sort_key(item):
+                if item["alias"] == "cancel":
+                    return (3, 0, 0)
+                if item["latency"] is None:
+                    return (1, 0, alias_order.index(item["alias"]))
+                if item["latency"] == float('inf'):
+                    return (2, 0, alias_order.index(item["alias"]))
+                return (0, item["latency"], alias_order.index(item["alias"]))
+            
+            mirrors_list.sort(key=get_sort_key)
+            
         safe_refresh()
 
     def bg_check_network():
@@ -769,9 +799,16 @@ def select_mirror(timeout):
     tty.setcbreak(fd)
     
     try:
+        # Resolve initial index
+        initial_index = 0
+        for idx, item in enumerate(mirrors_list):
+            if item["alias"] == state["selected_alias"]:
+                initial_index = idx
+                break
+        
         initial_renderable = make_full_layout(
             mirrors_list, 
-            state["selected_index"], 
+            initial_index, 
             current_url, 
             found_name, 
             state["network_status"], 
@@ -796,16 +833,35 @@ def select_mirror(timeout):
                     continue
                 
                 if key in ('\r', '\n'):  # Enter
-                    selected = mirrors_list[state["selected_index"]]
+                    with render_lock:
+                        selected = None
+                        for item in mirrors_list:
+                            if item["alias"] == state["selected_alias"]:
+                                selected = item
+                                break
                     break
                 elif key in ('q', 'Q', '\x1b'):  # Esc, 'q'
                     selected = None
                     break
                 elif key == '\x1b[A':  # Up Arrow
-                    state["selected_index"] = (state["selected_index"] - 1) % len(mirrors_list)
+                    with render_lock:
+                        curr_idx = 0
+                        for idx, item in enumerate(mirrors_list):
+                            if item["alias"] == state["selected_alias"]:
+                                curr_idx = idx
+                                break
+                        new_idx = (curr_idx - 1) % len(mirrors_list)
+                        state["selected_alias"] = mirrors_list[new_idx]["alias"]
                     safe_refresh()
                 elif key == '\x1b[B':  # Down Arrow
-                    state["selected_index"] = (state["selected_index"] + 1) % len(mirrors_list)
+                    with render_lock:
+                        curr_idx = 0
+                        for idx, item in enumerate(mirrors_list):
+                            if item["alias"] == state["selected_alias"]:
+                                curr_idx = idx
+                                break
+                        new_idx = (curr_idx + 1) % len(mirrors_list)
+                        state["selected_alias"] = mirrors_list[new_idx]["alias"]
                     safe_refresh()
     except KeyboardInterrupt:
         console.show_cursor(True)
