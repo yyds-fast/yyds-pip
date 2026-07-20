@@ -5,12 +5,13 @@ import subprocess
 import urllib.request
 import ssl
 import select
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 import click
-import threading
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.live import Live
@@ -32,51 +33,55 @@ MIRRORS = {
     "aliyun": {
         "name": "阿里云",
         "url": "https://mirrors.aliyun.com/pypi/simple/",
-        "trusted_host": "mirrors.aliyun.com"
+        "trusted_host": None
     },
     "tsinghua": {
         "name": "清华大学",
         "url": "https://pypi.tuna.tsinghua.edu.cn/simple/",
-        "trusted_host": "pypi.tuna.tsinghua.edu.cn"
+        "trusted_host": None
     },
     "tencent": {
         "name": "腾讯云",
         "url": "https://mirrors.cloud.tencent.com/pypi/simple/",
-        "trusted_host": "mirrors.cloud.tencent.com"
+        "trusted_host": None
     },
     "douban": {
         "name": "豆瓣",
         "url": "https://pypi.doubanio.com/simple/",
-        "trusted_host": "pypi.doubanio.com"
+        "trusted_host": None
     },
     "huawei": {
         "name": "华为云",
         "url": "https://repo.huaweicloud.com/repository/pypi/simple/",
-        "trusted_host": "repo.huaweicloud.com"
+        "trusted_host": None
     },
     "ustc": {
         "name": "中国科学技术大学",
         "url": "https://pypi.mirrors.ustc.edu.cn/simple/",
-        "trusted_host": "pypi.mirrors.ustc.edu.cn"
+        "trusted_host": None
     },
     "sjtu": {
         "name": "上海交通大学",
         "url": "https://mirrors.sjtug.sjtu.edu.cn/pypi/web/simple/",
-        "trusted_host": "mirrors.sjtug.sjtu.edu.cn"
+        "trusted_host": None
     },
     "pypi": {
         "name": "PyPI 官方",
         "url": "https://pypi.org/simple/",
-        "trusted_host": "pypi.org"
+        "trusted_host": None
     }
 }
 
 console = Console()
 
+DEFAULT_INDEX_URL = "https://pypi.org/simple/"
+TIMEOUT_TYPE = click.FloatRange(min=0.1, max=60.0)
+CONFIG_SCOPE_TYPE = click.Choice(["user", "site", "global"], case_sensitive=False)
+
 # ----------------- Helper functions for reading terminal keys -----------------
 
 def get_key():
-    """Reads a single keypress from the user in a non-blocking raw mode (Unix only)."""
+    """Read one keypress and normalize the arrow keys across platforms."""
     if WINDOWS:
         # Simple fallback for Windows if needed
         import msvcrt
@@ -97,7 +102,8 @@ def get_key():
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
+        # cbreak keeps terminal output processing enabled while Live redraws.
+        tty.setcbreak(fd)
         # Block until stdin has data
         ch = os.read(fd, 1).decode('utf-8', errors='ignore')
         if ch == '\x1b':
@@ -117,68 +123,165 @@ def get_key():
 
 # ----------------- Helper functions for pip config -----------------
 
-def get_current_index_url():
-    """Gets the current configured pip global index-url."""
-    try:
-        res = subprocess.run(["pip", "config", "get", "global.index-url"], capture_output=True, text=True, check=True)
-        return res.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
+class PipConfigError(RuntimeError):
+    """Raised when pip configuration cannot be updated safely."""
 
-def set_pip_mirror(url, trusted_host=None):
-    """Sets the pip global index-url and trusted-host."""
+
+def _pip_config_command(*args, scope=None):
+    command = [sys.executable, "-m", "pip", "config"]
+    if scope:
+        command.append(f"--{scope}")
+    command.extend(args)
+    return command
+
+
+def _run_pip_config(*args, scope=None, check=False):
+    return subprocess.run(
+        _pip_config_command(*args, scope=scope),
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def _get_pip_config_value(key, scope=None):
     try:
-        subprocess.run(["pip", "config", "set", "global.index-url", url], check=True, capture_output=True)
-        if trusted_host:
-            subprocess.run(["pip", "config", "set", "install.trusted-host", trusted_host], check=True, capture_output=True)
-        else:
-            # Try to unset trusted-host if it's PyPI official or if not specified
-            subprocess.run(["pip", "config", "unset", "install.trusted-host"], capture_output=True)
-        return True
-    except Exception as e:
-        console.print(f"[bold red]❌ 配置镜像源失败: {e}[/bold red]")
-        return False
+        result = _run_pip_config("get", key, scope=scope)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def get_current_index_url():
+    """Return the effective pip index URL that can be determined locally."""
+    environment_url = os.environ.get("PIP_INDEX_URL", "").strip()
+    if environment_url:
+        return environment_url
+
+    for key in ("install.index-url", "global.index-url"):
+        value = _get_pip_config_value(key)
+        if value:
+            return value
+    return None
+
+
+def _restore_pip_config(previous_values, scope):
+    for key, value in previous_values.items():
+        try:
+            if value is None:
+                _run_pip_config("unset", key, scope=scope)
+            else:
+                _run_pip_config("set", key, value, scope=scope)
+        except OSError:
+            pass
+
+
+def _apply_pip_config(changes, scope="user"):
+    previous_values = {
+        key: _get_pip_config_value(key, scope=scope)
+        for key in changes
+    }
+    try:
+        for key, value in changes.items():
+            if value is None:
+                if previous_values[key] is not None:
+                    _run_pip_config("unset", key, scope=scope, check=True)
+            else:
+                _run_pip_config("set", key, value, scope=scope, check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        _restore_pip_config(previous_values, scope)
+        detail = getattr(error, "stderr", "") or str(error)
+        raise PipConfigError(detail.strip()) from error
+
+
+def set_pip_mirror(url, trusted_host=None, scope="user"):
+    """Set pip's index URL and remove implicit TLS trust exceptions."""
+    _apply_pip_config({
+        "global.index-url": url,
+        "global.trusted-host": trusted_host,
+        # Clean up the key written by yyds-pip versions before 0.4.7.
+        "install.trusted-host": None,
+    }, scope=scope)
+
+
+def reset_pip_config(scope="user"):
+    """Remove mirror-related values so pip can fall back to its defaults."""
+    _apply_pip_config({
+        "global.index-url": None,
+        "install.index-url": None,
+        "global.trusted-host": None,
+        "install.trusted-host": None,
+    }, scope=scope)
+
+
+def warn_if_environment_overrides(configured_url=None):
+    environment_url = os.environ.get("PIP_INDEX_URL", "").strip()
+    if not environment_url:
+        return
+    if configured_url and environment_url.rstrip("/") == configured_url.rstrip("/"):
+        return
+    console.print(
+        "[bold yellow]⚠ 环境变量 PIP_INDEX_URL 仍会覆盖上述配置：[/bold yellow] "
+        f"[yellow]{escape(environment_url)}[/yellow]"
+    )
+
+
+def validate_custom_mirror_url(value, allow_insecure=False):
+    """Validate a custom index URL and return its explicit trust exception."""
+    if value != value.strip() or any(char in value for char in "\r\n\t"):
+        raise ValueError("URL 不能包含首尾空格或控制字符")
+
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"URL 端口无效: {error}") from error
+
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("参数必须为预设别名或合法的 HTTP/HTTPS 镜像 URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL 中不能包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise ValueError("镜像 URL 不能包含查询参数或片段")
+    if scheme == "http" and not allow_insecure:
+        raise ValueError("HTTP 源不安全；如确需使用，请显式添加 --allow-insecure")
+
+    trusted_host = None
+    if scheme == "http":
+        hostname = parsed.hostname
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        trusted_host = f"{hostname}:{port}" if port is not None else hostname
+    return value, trusted_host
 
 # ----------------- Helper functions for HTTP headers -----------------
 
 def get_request_headers(url=None):
-    """获取详细且符合标准的 HTTP 请求头，避免被镜像源或外部网络防火墙/防爬虫机制拦截"""
-    # 模拟现代主流浏览器的 User-Agent，同时包含 yyds-pip 的版本标识
-    user_agent = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 yyds-pip/{__version__}"
-    )
-    
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
-        "Connection": "keep-alive",
-        "Cache-Control": "max-age=0",
+    """Return minimal, honest headers suitable for a PEP 503 endpoint."""
+    return {
+        "User-Agent": f"yyds-pip/{__version__} (+https://github.com/yyds-fast/yyds-pip)",
+        "Accept": (
+            "application/vnd.pypi.simple.v1+json, "
+            "application/vnd.pypi.simple.v1+html, text/html;q=0.9"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
-    
-    # 如果传入了具体的 url，则解析其 host 并添加 Host 头
-    if url:
-        try:
-            parsed = urlparse(url)
-            if parsed.netloc:
-                headers["Host"] = parsed.netloc
-        except Exception:
-            pass
-            
-    return headers
 
 # ----------------- Helper functions for speed testing -----------------
 
-def test_single_mirror(alias, info, timeout=3.0):
+def test_single_mirror(alias, info, timeout=3.0, ssl_context=None):
     """Tests the latency of a single mirror URL."""
     url = info["url"]
     # Append 'pip/' to request a small packages page (reliable latency test)
     test_url = url.rstrip('/') + '/pip/'
+    if ssl_context is None:
+        ssl_context = ssl.create_default_context()
     start = time.perf_counter()
     try:
-        # Create unverified context to bypass local SSL issue
-        ssl_context = ssl._create_unverified_context()
         req = urllib.request.Request(
             test_url,
             headers=get_request_headers(test_url)
@@ -194,9 +297,16 @@ def test_single_mirror(alias, info, timeout=3.0):
 def test_all_mirrors_parallel(timeout=3.0):
     """Concurrently tests speeds of all mirrors using a ThreadPoolExecutor."""
     results = {}
+    ssl_context = ssl.create_default_context()
     with ThreadPoolExecutor(max_workers=len(MIRRORS)) as executor:
         futures = {
-            executor.submit(test_single_mirror, alias, info, timeout): alias
+            executor.submit(
+                test_single_mirror,
+                alias,
+                info,
+                timeout,
+                ssl_context,
+            ): alias
             for alias, info in MIRRORS.items()
         }
         for future in as_completed(futures):
@@ -217,11 +327,7 @@ def check_network_status(timeout=1.5):
         ("https://www.aliyun.com", "aliyun.com"),
         ("https://www.360.cn", "360.cn")
     ]
-    ssl_context = ssl._create_unverified_context()
-    
-    results = {}
-    lock = threading.Lock()
-    event = threading.Event()
+    ssl_context = ssl.create_default_context()
     
     def test_url(url, label):
         start = time.perf_counter()
@@ -233,52 +339,43 @@ def check_network_status(timeout=1.5):
             with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                 if response.status == 200:
                     duration = (time.perf_counter() - start) * 1000
-                    with lock:
-                        results[label] = (duration, True)
-                    event.set()
-                    return
+                    return label, duration, True
         except Exception:
             pass
-        with lock:
-            results[label] = (float('inf'), False)
-        if len(results) == len(target_urls):
-            event.set()
+        return label, float('inf'), False
 
-    for url, label in target_urls:
-        t = threading.Thread(target=test_url, args=(url, label), daemon=True)
-        t.start()
-        
-    # Wait until all threads finish or timeout expires
-    end_time = time.perf_counter() + timeout + 0.1
-    while time.perf_counter() < end_time:
-        with lock:
-            if len(results) == len(target_urls):
-                break
-        event.wait(0.02)
-        
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(target_urls)) as executor:
+        futures = [
+            executor.submit(test_url, url, label)
+            for url, label in target_urls
+        ]
+        for future in as_completed(futures):
+            label, duration, success = future.result()
+            results[label] = (duration, success)
+
     # Process results
-    with lock:
-        success_results = {label: res for label, res in results.items() if res[1]}
-        
-        # Format detail string
-        detail_parts = []
-        for _, label in target_urls:
-            if label in results:
-                duration, success = results[label]
-                if success:
-                    detail_parts.append(f"{label}: {duration:.1f} ms")
-                else:
-                    detail_parts.append(f"{label}: [bold red]🔴 异常[/bold red]")
+    success_results = {label: res for label, res in results.items() if res[1]}
+
+    # Format detail string
+    detail_parts = []
+    for _, label in target_urls:
+        if label in results:
+            duration, success = results[label]
+            if success:
+                detail_parts.append(f"{label}: {duration:.1f} ms")
             else:
-                detail_parts.append(f"{label}: [bold red]🔴 超时[/bold red]")
-                
-        details_str = ", ".join(detail_parts)
-        
-        if success_results:
-            min_label = min(success_results.keys(), key=lambda l: success_results[l][0])
-            min_latency = success_results[min_label][0]
-            return min_latency, True, details_str
-            
+                detail_parts.append(f"{label}: [bold red]🔴 异常[/bold red]")
+        else:
+            detail_parts.append(f"{label}: [bold red]🔴 超时[/bold red]")
+
+    details_str = ", ".join(detail_parts)
+
+    if success_results:
+        min_label = min(success_results.keys(), key=lambda l: success_results[l][0])
+        min_latency = success_results[min_label][0]
+        return min_latency, True, details_str
+
     return float('inf'), False, details_str
 
 def format_network_status(latency, success, target=None):
@@ -436,7 +533,7 @@ def show():
             if info["url"].rstrip('/') == current_url.rstrip('/'):
                 found_name = f"{info['name']} ({name})"
                 break
-        table.add_row("pip.global.index-url", current_url)
+        table.add_row("pip.global.index-url", escape(current_url))
         table.add_row("镜像名称", found_name)
     else:
         table.add_row("pip.global.index-url", "[dim]未配置 (默认使用 PyPI 官方)[/dim]")
@@ -460,15 +557,22 @@ def list_presets():
     table.add_column("镜像源名称", style="green")
     table.add_column("镜像源地址", style="dim")
 
+    effective_url = current_url or DEFAULT_INDEX_URL
     for alias, info in MIRRORS.items():
-        is_current = current_url and current_url.rstrip('/') == info["url"].rstrip('/')
+        is_current = effective_url.rstrip('/') == info["url"].rstrip('/')
         marker = "★" if is_current else ""
         table.add_row(marker, alias, info["name"], info["url"])
 
     console.print(Panel(table, title="[bold green]预设镜像源列表[/bold green]", border_style="cyan", expand=False))
 
 @main.command(name="test")
-@click.option("--timeout", default=3.0, type=float, help="请求超时时间（秒）")
+@click.option(
+    "--timeout",
+    default=3.0,
+    type=TIMEOUT_TYPE,
+    show_default=True,
+    help="请求超时时间（秒）",
+)
 def test(timeout):
     """⚡ 对所有镜像源进行并发测速"""
     current_url = get_current_index_url()
@@ -531,9 +635,24 @@ def test(timeout):
     if net_warning:
         console.print(net_warning)
 
+    if not any(success for _, success in results.values()):
+        raise click.ClickException("所有镜像源均测试失败")
+
 @main.command(name="set")
 @click.argument("alias_or_url")
-def set_mirror(alias_or_url):
+@click.option(
+    "--allow-insecure",
+    is_flag=True,
+    help="明确允许自定义 HTTP 源，并将其主机写入 trusted-host",
+)
+@click.option(
+    "--scope",
+    type=CONFIG_SCOPE_TYPE,
+    default="user",
+    show_default=True,
+    help="pip 配置文件作用域",
+)
+def set_mirror(alias_or_url, allow_insecure, scope):
     """🔧 设置 pip 镜像源"""
     # Check if the argument is a preset alias
     if alias_or_url in MIRRORS:
@@ -542,35 +661,53 @@ def set_mirror(alias_or_url):
         host = info["trusted_host"]
         name = info["name"]
     else:
-        # Check if it looks like a URL
-        parsed = urlparse(alias_or_url)
-        if parsed.scheme in ('http', 'https') and parsed.netloc:
-            url = alias_or_url
-            host = parsed.netloc
-            name = f"自定义源 ({host})"
-        else:
-            console.print(f"[bold red]❌ 错误的参数 '{alias_or_url}'。参数必须为预设别名或合法的 HTTP/HTTPS 镜像 URL。[/bold red]")
-            console.print("[yellow]提示：使用 [bold]yyds-pip list[/bold] 查看所有预设别名。[/yellow]")
-            return
+        try:
+            url, host = validate_custom_mirror_url(
+                alias_or_url,
+                allow_insecure=allow_insecure,
+            )
+        except ValueError as error:
+            raise click.BadParameter(str(error), param_hint="ALIAS_OR_URL") from error
+        name = f"自定义源 ({urlparse(url).hostname})"
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]正在应用配置项...[/bold blue]"),
-        console=console,
-        transient=True
-    ) as progress:
-        progress.add_task("setting", total=None)
-        success = set_pip_mirror(url, host)
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]正在应用配置项...[/bold blue]"),
+            console=console,
+            transient=True
+        ) as progress:
+            progress.add_task("setting", total=None)
+            set_pip_mirror(url, host, scope=scope)
+    except PipConfigError as error:
+        raise click.ClickException(f"配置镜像源失败: {error}") from error
 
-    if success:
-        console.print(f"[bold green]✔ 成功将 pip 镜像源设置为: [yellow]{name}[/yellow][/bold green]")
-        console.print(f"[dim]配置的链接 (index-url): {url}[/dim]")
-        if host:
-            console.print(f"[dim]信任的主机 (trusted-host): {host}[/dim]")
+    console.print(
+        "[bold green]✔ 成功将 pip 镜像源设置为: "
+        f"[yellow]{escape(name)}[/yellow][/bold green]"
+    )
+    console.print(f"[dim]配置的链接 (index-url): {escape(url)}[/dim]")
+    console.print(f"[dim]配置作用域 (scope): {scope}[/dim]")
+    if host:
+        console.print(f"[bold yellow]显式信任的主机: {escape(host)}[/bold yellow]")
+    warn_if_environment_overrides(url)
 
 @main.command(name="best")
-@click.option("--timeout", default=3.0, type=float, help="请求超时时间（秒）")
-def set_best(timeout):
+@click.option(
+    "--timeout",
+    default=3.0,
+    type=TIMEOUT_TYPE,
+    show_default=True,
+    help="请求超时时间（秒）",
+)
+@click.option(
+    "--scope",
+    type=CONFIG_SCOPE_TYPE,
+    default="user",
+    show_default=True,
+    help="pip 配置文件作用域",
+)
+def set_best(timeout, scope):
     """⚡ 自动测试速度并应用最快的镜像源"""
     results = {}
     with Progress(
@@ -588,9 +725,7 @@ def set_best(timeout):
     best_latency, success = results[best_alias]
 
     if not success or best_latency == float('inf'):
-        console.print("[bold red]❌ 所有镜像源均测试失败，无法确定最快镜像。[/bold red]")
-        console.print("[bold red]⚠️  当前网络已断开，请检查您的网络连接并重试！[/bold red]")
-        return
+        raise click.ClickException("所有镜像源均测试失败，无法确定最快镜像")
 
     info = MIRRORS[best_alias]
     console.print(f"[bold green]⚡ 测速完毕！最快镜像源为: [yellow]{info['name']} ({best_alias})[/yellow], 延迟: [bold green]{best_latency:.1f} ms[/bold green][/bold green]")
@@ -602,40 +737,59 @@ def set_best(timeout):
         console.print(warning)
         
     # Set it
-    set_success = set_pip_mirror(info["url"], info["trusted_host"])
-    if set_success:
-        console.print(f"[bold green]✔ 已成功自动切换到: {info['name']}[/bold green]")
+    try:
+        set_pip_mirror(info["url"], info["trusted_host"], scope=scope)
+    except PipConfigError as error:
+        raise click.ClickException(f"配置最快镜像源失败: {error}") from error
+    console.print(f"[bold green]✔ 已成功自动切换到: {info['name']}[/bold green]")
+    warn_if_environment_overrides(info["url"])
 
 @main.command(name="reset")
-def reset():
+@click.option(
+    "--scope",
+    type=CONFIG_SCOPE_TYPE,
+    default="user",
+    show_default=True,
+    help="pip 配置文件作用域",
+)
+def reset(scope):
     """🔄 恢复 pip 的官方默认镜像源 (PyPI)"""
-    info = MIRRORS["pypi"]
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]正在重置默认镜像源...[/bold blue]"),
-        console=console,
-        transient=True
-    ) as progress:
-        progress.add_task("resetting", total=None)
-        # Clear index-url and trusted-host config to let pip use default
-        try:
-            # Explicitly set index-url to PyPI official URL to override any legacy configurations
-            subprocess.run(["pip", "config", "set", "global.index-url", "https://pypi.org/simple/"], check=True, capture_output=True)
-            subprocess.run(["pip", "config", "unset", "install.trusted-host"], capture_output=True)
-            success = True
-        except Exception as e:
-            console.print(f"[bold red]❌ 重置失败: {e}[/bold red]")
-            success = False
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]正在重置默认镜像源...[/bold blue]"),
+            console=console,
+            transient=True
+        ) as progress:
+            progress.add_task("resetting", total=None)
+            reset_pip_config(scope=scope)
+    except PipConfigError as error:
+        raise click.ClickException(f"重置失败: {error}") from error
 
-    if success:
-        console.print("[bold green]✔ 成功重置配置！pip 现在将使用官方 PyPI 镜像源: [yellow]https://pypi.org/simple/[/yellow][/bold green]")
+    effective_url = get_current_index_url()
+    if effective_url and effective_url.rstrip('/') != DEFAULT_INDEX_URL.rstrip('/'):
+        console.print(
+            "[bold yellow]⚠ 已清除指定作用域的配置，但当前仍有更高优先级的源：[/bold yellow] "
+            f"[yellow]{escape(effective_url)}[/yellow]"
+        )
+    else:
+        console.print(
+            "[bold green]✔ 成功重置配置！pip 现在将使用官方 PyPI："
+            f"[yellow]{DEFAULT_INDEX_URL}[/yellow][/bold green]"
+        )
 
 def make_full_layout(mirrors_list, selected_index, current_url, found_name, network_status_str, warning_message=None):
     """组合状态看板与菜单列表为一个完整的渲染对象"""
     # 状态看板 Table
     status_table = Table(show_header=False, box=None, padding=(0, 2))
-    status_table.add_row("💡 [bold yellow]当前所用源 (Current):[/bold yellow]", f"[bold green]{found_name}[/bold green]")
-    status_table.add_row("🔗 [bold yellow]镜像源地址 (Index URL):[/bold yellow]", f"[cyan]{current_url or 'https://pypi.org/simple/'}[/cyan]")
+    status_table.add_row(
+        "💡 [bold yellow]当前所用源 (Current):[/bold yellow]",
+        f"[bold green]{escape(found_name)}[/bold green]",
+    )
+    status_table.add_row(
+        "🔗 [bold yellow]镜像源地址 (Index URL):[/bold yellow]",
+        f"[cyan]{escape(current_url or DEFAULT_INDEX_URL)}[/cyan]",
+    )
     status_table.add_row("🌍 [bold yellow]当前网络状况 (Network):[/bold yellow]", network_status_str)
     
     status_panel = Panel(
@@ -661,14 +815,34 @@ def make_full_layout(mirrors_list, selected_index, current_url, found_name, netw
     return Group(*renderables)
 
 @main.command(name="select")
-@click.option("--timeout", default=3.0, type=float, help="请求超时时间（秒）")
-def select_mirror(timeout):
+@click.option(
+    "--timeout",
+    default=3.0,
+    type=TIMEOUT_TYPE,
+    show_default=True,
+    help="请求超时时间（秒）",
+)
+@click.option(
+    "--scope",
+    type=CONFIG_SCOPE_TYPE,
+    default="user",
+    show_default=True,
+    help="pip 配置文件作用域",
+)
+def select_mirror(timeout, scope):
     """🎮 并发测速并进入键盘交互式选择菜单"""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise click.ClickException(
+            "交互选择需要 TTY 终端；请改用 'yyds-pip list'、'set' 或 'best'"
+        )
+
     current_url = get_current_index_url()
+    effective_current_url = current_url or DEFAULT_INDEX_URL
     
     # 1. Resolve current active mirror name
-    found_name = "未配置 (默认官方 PyPI)"
+    found_name = "PyPI 官方 (pypi)"
     if current_url:
+        found_name = "自定义/未知源"
         for name, info in MIRRORS.items():
             if info["url"].rstrip('/') == current_url.rstrip('/'):
                 found_name = f"{info['name']} ({name})"
@@ -677,7 +851,9 @@ def select_mirror(timeout):
     # 2. Build initial mirrors list (latency=None -> "测速中...")
     mirrors_list = []
     for alias, info in MIRRORS.items():
-        is_current = current_url and current_url.rstrip('/') == info["url"].rstrip('/')
+        is_current = (
+            effective_current_url.rstrip('/') == info["url"].rstrip('/')
+        )
         mirrors_list.append({
             "alias": alias,
             "name": info["name"],
@@ -713,10 +889,13 @@ def select_mirror(timeout):
         state["selected_alias"] = mirrors_list[0]["alias"]
 
     render_lock = threading.Lock()
+    stop_event = threading.Event()
+    alias_order = {alias: index for index, alias in enumerate(MIRRORS)}
+    ssl_context = ssl.create_default_context()
     live = None
 
     def safe_refresh():
-        if live is not None:
+        if live is not None and not stop_event.is_set():
             with render_lock:
                 try:
                     # Find selected_index based on selected_alias
@@ -737,8 +916,15 @@ def select_mirror(timeout):
                     pass
 
     # 3. Define background worker logic to test speeds and network status
-    def bg_test_mirror(alias, live_ref):
-        _, latency, success = test_single_mirror(alias, MIRRORS[alias], timeout=timeout)
+    def bg_test_mirror(alias):
+        _, latency, success = test_single_mirror(
+            alias,
+            MIRRORS[alias],
+            timeout=timeout,
+            ssl_context=ssl_context,
+        )
+        if stop_event.is_set():
+            return
         with render_lock:
             for item in mirrors_list:
                 if item["alias"] == alias:
@@ -751,16 +937,14 @@ def select_mirror(timeout):
             # 1: Pending (latency is None) - sorted by original MIRRORS keys order
             # 2: Failed/Timeout (latency == inf and alias != cancel) - sorted by original MIRRORS keys order
             # 3: Cancel option (alias == cancel) - always at the bottom
-            alias_order = list(MIRRORS.keys())
-            
             def get_sort_key(item):
                 if item["alias"] == "cancel":
                     return (3, 0, 0)
                 if item["latency"] is None:
-                    return (1, 0, alias_order.index(item["alias"]))
+                    return (1, 0, alias_order[item["alias"]])
                 if item["latency"] == float('inf'):
-                    return (2, 0, alias_order.index(item["alias"]))
-                return (0, item["latency"], alias_order.index(item["alias"]))
+                    return (2, 0, alias_order[item["alias"]])
+                return (0, item["latency"], alias_order[item["alias"]])
             
             mirrors_list.sort(key=get_sort_key)
             
@@ -768,37 +952,20 @@ def select_mirror(timeout):
 
     def bg_check_network():
         latency, success, target = check_network_status(timeout=2.0)
+        if stop_event.is_set():
+            return
         status_str, warning = format_network_status(latency, success, target)
         with render_lock:
             state["network_status"] = status_str
             state["warning_message"] = warning
         safe_refresh()
 
-    def read_key(fd):
-        ch = os.read(fd, 1).decode('utf-8', errors='ignore')
-        if ch == '\x1b':
-            # Check for arrow keys
-            r2, _, _ = select.select([fd], [], [], 0.05)
-            if r2:
-                ch2 = os.read(fd, 1).decode('utf-8', errors='ignore')
-                if ch2 == '[':
-                    r3, _, _ = select.select([fd], [], [], 0.05)
-                    if r3:
-                        ch3 = os.read(fd, 1).decode('utf-8', errors='ignore')
-                        return f"\x1b[{ch3}"
-                return '\x1b'
-        return ch
-
-    console.show_cursor(False)
     selected = None
     executor = ThreadPoolExecutor(max_workers=len(MIRRORS))
-    
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    # Put terminal in cbreak mode to read keys immediately, but keep OPOST output processing enabled
-    tty.setcbreak(fd)
-    
+    mirror_futures = []
+
     try:
+        console.show_cursor(False)
         # Resolve initial index
         initial_index = 0
         for idx, item in enumerate(mirrors_list):
@@ -824,11 +991,11 @@ def select_mirror(timeout):
             
             # Launch background thread pool for testing mirrors
             for alias in MIRRORS.keys():
-                executor.submit(bg_test_mirror, alias, live)
+                mirror_futures.append(executor.submit(bg_test_mirror, alias))
 
             # Keyboard event loop
             while True:
-                key = read_key(fd)
+                key = get_key()
                 if not key:
                     continue
                 
@@ -839,10 +1006,26 @@ def select_mirror(timeout):
                             if item["alias"] == state["selected_alias"]:
                                 selected = item
                                 break
+                        if selected and selected["alias"] != "cancel":
+                            if selected["latency"] is None:
+                                state["warning_message"] = (
+                                    "[bold yellow]⚠ 该镜像仍在测速，请稍候再确认。[/bold yellow]"
+                                )
+                                selected = None
+                            elif selected["latency"] == float('inf'):
+                                state["warning_message"] = (
+                                    "[bold red]⚠ 该镜像当前不可用，请选择其他镜像。[/bold red]"
+                                )
+                                selected = None
+                    if selected is None:
+                        safe_refresh()
+                        continue
                     break
                 elif key in ('q', 'Q', '\x1b'):  # Esc, 'q'
                     selected = None
                     break
+                elif key == '\x03':
+                    raise KeyboardInterrupt
                 elif key == '\x1b[A':  # Up Arrow
                     with render_lock:
                         curr_idx = 0
@@ -863,24 +1046,31 @@ def select_mirror(timeout):
                         new_idx = (curr_idx + 1) % len(mirrors_list)
                         state["selected_alias"] = mirrors_list[new_idx]["alias"]
                     safe_refresh()
+        with render_lock:
+            live = None
     except KeyboardInterrupt:
-        console.show_cursor(True)
-        executor.shutdown(wait=False)
         console.print("\n[bold red]✖ 用户取消选择。[/bold red]")
         return
     finally:
+        stop_event.set()
+        for future in mirror_futures:
+            future.cancel()
         console.show_cursor(True)
-        # Restore terminal settings
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         executor.shutdown(wait=False)
 
     # 4. Process the selected mirror
     if selected and selected["alias"] != "cancel":
-        # Set mirror
-        success = set_pip_mirror(selected["url"], selected["trusted_host"])
-        if success:
-            console.print(f"\n[bold green]✔ 配置成功！已切换到镜像源: [yellow]{selected['name']}[/yellow][/bold green]")
-            console.print(f"[dim]地址: {selected['url']}[/dim]")
+        try:
+            set_pip_mirror(
+                selected["url"],
+                selected["trusted_host"],
+                scope=scope,
+            )
+        except PipConfigError as error:
+            raise click.ClickException(f"配置镜像源失败: {error}") from error
+        console.print(f"\n[bold green]✔ 配置成功！已切换到镜像源: [yellow]{selected['name']}[/yellow][/bold green]")
+        console.print(f"[dim]地址: {selected['url']}[/dim]")
+        warn_if_environment_overrides(selected["url"])
     else:
         console.print("\n[yellow]⚠ 未选择任何镜像源，配置未更改。[/yellow]")
 

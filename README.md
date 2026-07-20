@@ -6,7 +6,8 @@
 
 ## ✨ 核心特性
 
-- ⚡ **极致性能**：采用多线程并发测试（`ThreadPoolExecutor`）各大镜像源延迟，通常在 **0.5秒内** 完成所有源的测速。
+- ⚡ **并发测速**：采用 `ThreadPoolExecutor` 并发测试各大镜像源延迟，整体耗时受网络状况和 `--timeout` 设置控制。
+- 🔒 **安全默认值**：HTTPS 请求默认验证服务器证书，不会自动把 HTTPS 镜像加入 `trusted-host`。
 - 🎮 **键盘交互选择**：支持在终端直接使用 **上下方向键 (↑/↓)** 选择镜像源，回车一键切换，极具人性化。
 - ❌ **全新取消选项**：在选择菜单中添加了 `❌ 取消选择 (Cancel)` 行，操作上更加方便直接，支持按 Enter 或 `Esc`/`q` 放弃配置变更退出。
 - 🎨 **视觉观赏度高**：使用 `rich` 库构建绚丽多彩的当前状态看板、加载动画，并在测速结果中以色阶标记延迟（绿/黄/红）。
@@ -85,12 +86,26 @@ yyds-pip test
 ```bash
 yyds-pip set tsinghua
 ```
-或者输入自定义的 HTTP/HTTPS 源 URL：
+或者输入自定义的 HTTPS 源 URL：
 ```bash
 yyds-pip set https://mirrors.aliyun.com/pypi/simple/
+```
+
+HTTP 源会降低连接安全性，必须显式确认：
+
+```bash
+yyds-pip set --allow-insecure http://localhost:8080/simple/
+```
+
+修改配置的命令支持 `--scope user|site|global`，默认写入用户级配置。例如：
+
+```bash
+yyds-pip set --scope site tsinghua
 ```
 
 ### 7. 恢复官方源
 ```bash
 yyds-pip reset
 ```
+
+如果存在 `PIP_INDEX_URL` 环境变量，它仍会覆盖配置文件；工具会在修改后给出提示。

@@ -34,13 +34,20 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Operating System :: OS Independent",
-        "License :: OSI Approved :: MIT License",
     ],
     install_requires=[
         "click>=8.0.0",
         "rich>=12.0.0",
     ],
+    extras_require={
+        "dev": [
+            "build>=1.0",
+            "pytest>=7.0",
+            "twine>=4.0",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "yyds-pip = yyds_pip.cli:main",
