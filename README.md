@@ -25,9 +25,9 @@
 | `aliyun` | 阿里云 |
 | `tsinghua` | 清华大学 |
 | `tencent` | 腾讯云 |
-| `douban` | 豆瓣 |
 | `huawei` | 华为云 |
 | `ustc` | 中国科学技术大学 |
+| `bfsu` | 北京外国语大学 |
 | `sjtu` | 上海交通大学 |
 | `pypi` | PyPI 官方 |
 
@@ -46,7 +46,7 @@ pip install -U yyds-pip
 pip install -e .
 ```
 
-*注：该工具要求 Python >= 3.7，依赖 `click` 与 `rich` 库。*
+*注：该工具要求 Python >= 3.8，依赖 `click` 与 `rich` 库。*
 
 ---
 

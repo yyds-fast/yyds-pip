@@ -1,6 +1,54 @@
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "yyds-pip"
+dynamic = ["version"]
+description = "A high-performance, user-friendly, and beautiful PyPI mirror source manager."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "yyds-fast", email = "yyds.fast@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "click>=8.0.0",
+    "rich>=12.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yyds-fast/yyds-pip"
+Repository = "https://github.com/yyds-fast/yyds-pip"
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0",
+    "pytest>=7.0",
+    "twine>=4.0",
+]
+
+[project.scripts]
+yyds-pip = "yyds_pip.cli:main"
+yyds_pip = "yyds_pip.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["yyds_pip*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "yyds_pip.__version__.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
